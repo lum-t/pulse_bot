@@ -231,6 +231,12 @@ def build_app() -> Application:
 
 
 async def main():
+    import os
+    print("=== ENV DEBUG ===", flush=True)
+    print(f"TELEGRAM_TOKEN: '{os.getenv('TELEGRAM_TOKEN', 'NOT FOUND')}'", flush=True)
+    print(f"TELEGRAM_CHANNEL_ID: '{os.getenv('TELEGRAM_CHANNEL_ID', 'NOT FOUND')}'", flush=True)
+    print("=================", flush=True)
+
     if not config.TELEGRAM_TOKEN:
         raise ValueError("TELEGRAM_TOKEN is not set in your .env file")
     if not config.TELEGRAM_CHANNEL_ID:
