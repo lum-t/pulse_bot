@@ -1,80 +1,129 @@
 """
 signals.py — PULSE Market Intelligence
 Solana memecoin signal detection via DexScreener API
-Completely separate from content engine
+Fixed: correct endpoints, lower threshold, better fallback
 """
 
 import requests
-import time
 from datetime import datetime, timezone
 from config import (
-    DEXSCREENER_BASE_URL, SOLANA_CHAIN,
+    SOLANA_CHAIN,
     VOLUME_SPIKE_MULTIPLIER, PRICE_CHANGE_THRESHOLD,
     MIN_LIQUIDITY_USD, NEW_TOKEN_HOURS
 )
+
+DEXSCREENER_API = "https://api.dexscreener.com"
 
 
 # ─── Fetch trending Solana pairs ─────────────────────────────
 
 def get_trending_solana_pairs() -> list[dict]:
-    """Fetch top trending Solana pairs from DexScreener."""
+    """
+    Fetch top trending Solana pairs directly from DexScreener.
+    Uses /token-boosts to get hot token addresses, then fetches
+    their actual pair data via /tokens endpoint.
+    """
     try:
-        url = f"{DEXSCREENER_BASE_URL}/tokens/{SOLANA_CHAIN}"
-        # Use search for trending memecoins
-        url = f"https://api.dexscreener.com/token-boosts/top/v1"
-        res = requests.get(url, timeout=10)
+        # Step 1: Get boosted/trending token addresses
+        res = requests.get(
+            f"{DEXSCREENER_API}/token-boosts/top/v1",
+            timeout=10
+        )
         res.raise_for_status()
-        data = res.json()
+        boosts = res.json()
 
-        # Filter to Solana only
-        solana_pairs = [
-            item for item in data
+        # Filter Solana only and collect addresses
+        sol_addresses = [
+            item["tokenAddress"]
+            for item in boosts
             if item.get("chainId", "").lower() == SOLANA_CHAIN
+            and item.get("tokenAddress")
+        ][:15]  # top 15
+
+        if not sol_addresses:
+            return []
+
+        # Step 2: Batch fetch pair data for those addresses
+        # DexScreener allows comma-separated addresses
+        batch = ",".join(sol_addresses[:30])
+        res2 = requests.get(
+            f"{DEXSCREENER_API}/latest/dex/tokens/{batch}",
+            timeout=15
+        )
+        res2.raise_for_status()
+        data = res2.json()
+
+        pairs = data.get("pairs") or []
+        # Keep only Solana pairs with some liquidity
+        sol_pairs = [
+            p for p in pairs
+            if p.get("chainId", "").lower() == SOLANA_CHAIN
+            and float((p.get("liquidity") or {}).get("usd", 0) or 0) >= MIN_LIQUIDITY_USD
         ]
-        return solana_pairs[:20]  # top 20
+
+        return sol_pairs[:20]
 
     except Exception as e:
         print(f"[signals] Error fetching trending pairs: {e}")
         return []
 
 
+def get_trending_solana_pairs_fallback() -> list[dict]:
+    """
+    Fallback: search DexScreener for active Solana memecoins directly.
+    Used when boost endpoint fails.
+    """
+    try:
+        keywords = ["solana", "sol", "pepe", "doge", "meme"]
+        all_pairs = []
+        for kw in keywords[:3]:
+            res = requests.get(
+                f"{DEXSCREENER_API}/latest/dex/search?q={kw}",
+                timeout=10
+            )
+            res.raise_for_status()
+            data = res.json()
+            pairs = data.get("pairs") or []
+            sol_pairs = [
+                p for p in pairs
+                if p.get("chainId", "").lower() == SOLANA_CHAIN
+            ]
+            all_pairs.extend(sol_pairs[:5])
+
+        # Deduplicate by pair address
+        seen = set()
+        unique = []
+        for p in all_pairs:
+            addr = p.get("pairAddress", "")
+            if addr not in seen:
+                seen.add(addr)
+                unique.append(p)
+
+        return unique[:20]
+
+    except Exception as e:
+        print(f"[signals] Fallback fetch error: {e}")
+        return []
+
+
 def get_new_solana_tokens() -> list[dict]:
     """Fetch newly launched Solana tokens from DexScreener."""
     try:
-        url = f"https://api.dexscreener.com/token-profiles/latest/v1"
-        res = requests.get(url, timeout=10)
+        res = requests.get(
+            f"{DEXSCREENER_API}/token-profiles/latest/v1",
+            timeout=10
+        )
         res.raise_for_status()
         data = res.json()
 
-        solana_tokens = [
+        return [
             item for item in data
             if item.get("chainId", "").lower() == SOLANA_CHAIN
-        ]
-        return solana_tokens[:10]
+        ][:10]
 
     except Exception as e:
         print(f"[signals] Error fetching new tokens: {e}")
         return []
-
-
-def get_pair_details(token_address: str) -> dict | None:
-    """Get detailed data for a specific token address."""
-    try:
-        url = f"{DEXSCREENER_BASE_URL}/tokens/{token_address}"
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        pairs = data.get("pairs", [])
-
-        # Return the Solana pair with highest liquidity
-        solana_pairs = [p for p in pairs if p.get("chainId") == SOLANA_CHAIN]
-        if not solana_pairs:
-            return None
-        return max(solana_pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
-
-    except Exception as e:
-        print(f"[signals] Error fetching pair details: {e}")
-        return None
 
 
 # ─── Signal Analysis ─────────────────────────────────────────
@@ -84,17 +133,17 @@ def calculate_probability(pair: dict) -> dict:
     Calculate bullish/bearish probability from on-chain data.
     Returns a dict with scores and reasoning.
     """
-    score = 50  # start neutral
+    score = 50  # neutral start
     reasons = []
 
-    price_change_1h  = float(pair.get("priceChange", {}).get("h1",  0) or 0)
-    price_change_6h  = float(pair.get("priceChange", {}).get("h6",  0) or 0)
-    price_change_24h = float(pair.get("priceChange", {}).get("h24", 0) or 0)
-    volume_1h        = float(pair.get("volume",      {}).get("h1",  0) or 0)
-    volume_24h       = float(pair.get("volume",      {}).get("h24", 0) or 0)
-    liquidity_usd    = float(pair.get("liquidity",   {}).get("usd", 0) or 0)
-    txns_buys_1h     = pair.get("txns", {}).get("h1", {}).get("buys",  0) or 0
-    txns_sells_1h    = pair.get("txns", {}).get("h1", {}).get("sells", 0) or 0
+    price_change_1h  = float((pair.get("priceChange") or {}).get("h1",  0) or 0)
+    price_change_6h  = float((pair.get("priceChange") or {}).get("h6",  0) or 0)
+    price_change_24h = float((pair.get("priceChange") or {}).get("h24", 0) or 0)
+    volume_1h        = float((pair.get("volume")      or {}).get("h1",  0) or 0)
+    volume_24h       = float((pair.get("volume")      or {}).get("h24", 0) or 0)
+    liquidity_usd    = float((pair.get("liquidity")   or {}).get("usd", 0) or 0)
+    txns_buys_1h     = (pair.get("txns") or {}).get("h1", {}).get("buys",  0) or 0
+    txns_sells_1h    = (pair.get("txns") or {}).get("h1", {}).get("sells", 0) or 0
 
     # Price momentum
     if price_change_1h > 30:
@@ -110,7 +159,7 @@ def calculate_probability(pair: dict) -> dict:
         score -= 10
         reasons.append("Negative 1h momentum")
 
-    # Volume analysis
+    # Volume spike vs daily average
     if volume_24h > 0:
         hourly_avg = volume_24h / 24
         if hourly_avg > 0 and volume_1h > hourly_avg * VOLUME_SPIKE_MULTIPLIER:
@@ -141,13 +190,12 @@ def calculate_probability(pair: dict) -> dict:
         score += 10
         reasons.append("All timeframes green")
 
-    # Clamp between 5 and 95
     score = max(5, min(95, score))
 
     return {
-        "bullish":  score,
-        "bearish":  100 - score,
-        "reasons":  reasons,
+        "bullish":          score,
+        "bearish":          100 - score,
+        "reasons":          reasons,
         "volume_1h":        volume_1h,
         "volume_24h":       volume_24h,
         "price_change_1h":  price_change_1h,
@@ -162,55 +210,62 @@ def detect_signals() -> list[dict]:
     """
     Main signal detection function.
     Returns list of significant signals ready for alerting.
+    Uses primary endpoint with fallback to search.
     """
     signals = []
-    trending = get_trending_solana_pairs()
 
-    for item in trending:
-        token_address = item.get("tokenAddress")
-        if not token_address:
-            continue
+    # Try primary endpoint first
+    pairs = get_trending_solana_pairs()
 
-        pair = get_pair_details(token_address)
-        if not pair:
-            continue
+    # Fallback if primary returned nothing
+    if not pairs:
+        print("[signals] Primary fetch empty — trying fallback search...")
+        pairs = get_trending_solana_pairs_fallback()
 
-        price_change_1h = float(pair.get("priceChange", {}).get("h1", 0) or 0)
-        liquidity_usd   = float(pair.get("liquidity",   {}).get("usd", 0) or 0)
+    if not pairs:
+        print("[signals] No pairs found from any source.")
+        return []
 
-        # Only surface meaningful signals
-        if abs(price_change_1h) < PRICE_CHANGE_THRESHOLD:
+    print(f"[signals] Processing {len(pairs)} pairs...")
+
+    for pair in pairs:
+        price_change_1h = float((pair.get("priceChange") or {}).get("h1", 0) or 0)
+        liquidity_usd   = float((pair.get("liquidity")   or {}).get("usd", 0) or 0)
+
+        # Filter: only surface meaningful moves
+        # Using half of config threshold so we don't miss everything
+        effective_threshold = PRICE_CHANGE_THRESHOLD / 2
+        if abs(price_change_1h) < effective_threshold:
             continue
         if liquidity_usd < MIN_LIQUIDITY_USD:
             continue
 
-        prob     = calculate_probability(pair)
-        base_token = pair.get("baseToken", {})
+        prob       = calculate_probability(pair)
+        base_token = pair.get("baseToken") or {}
 
         signals.append({
-            "name":     base_token.get("name",   "Unknown"),
-            "symbol":   base_token.get("symbol", "???"),
-            "address":  base_token.get("address", ""),
+            "name":      base_token.get("name",    "Unknown"),
+            "symbol":    base_token.get("symbol",  "???"),
+            "address":   base_token.get("address", ""),
             "price_usd": pair.get("priceUsd", "N/A"),
-            "dex_url":  pair.get("url", ""),
+            "dex_url":   pair.get("url", ""),
             "probability": prob,
         })
 
+    print(f"[signals] {len(signals)} signals passed filters.")
     return signals
 
 
 def get_new_token_alerts() -> list[dict]:
     """Return newly launched Solana tokens for the /newtokens command."""
     tokens = get_new_solana_tokens()
-    results = []
-
-    for token in tokens:
-        results.append({
-            "name":        token.get("description", "New Token"),
-            "address":     token.get("tokenAddress", ""),
-            "chain":       token.get("chainId", "solana"),
-            "url":         token.get("url", ""),
-            "icon":        token.get("icon", ""),
-        })
-
-    return results
+    return [
+        {
+            "name":    token.get("description", "New Token"),
+            "address": token.get("tokenAddress", ""),
+            "chain":   token.get("chainId", "solana"),
+            "url":     token.get("url", ""),
+            "icon":    token.get("icon", ""),
+        }
+        for token in tokens
+    ]

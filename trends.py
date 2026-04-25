@@ -1,15 +1,14 @@
 """
 trends.py — PULSE Content Intelligence
 Trend detection + AI-powered animation content idea generator
-Uses Claude (Anthropic) for unique, high-quality content ideas
-Completely separate from market/signal engine
+Now includes: best time to post per platform based on trend timing
 """
 
 import os
 import random
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     from pytrends.request import TrendReq
@@ -20,8 +19,102 @@ except ImportError:
 from config import (
     CRYPTO_KEYWORDS, LIFESTYLE_KEYWORDS,
     ANIMATION_KEYWORDS, GENERAL_TRENDING,
-    PLATFORMS, GEMINI_API_KEY
+    PLATFORMS, GEMINI_API_KEY, DEFAULT_TIMEZONE
 )
+
+
+# ─── Best Time To Post Engine ────────────────────────────────
+
+# Peak engagement windows per platform (hour ranges in local time)
+PLATFORM_PEAK_HOURS = {
+    "YouTube": [
+        (14, 16, "Fri"),   # Friday 2–4pm
+        (15, 17, "Sat"),   # Saturday 3–5pm
+        (14, 16, "Sun"),   # Sunday 2–4pm
+        (17, 19, "weekday"),  # Weekday 5–7pm
+    ],
+    "TikTok": [
+        (7,  9,  "any"),   # Morning 7–9am
+        (12, 15, "any"),   # Lunch 12–3pm
+        (19, 23, "any"),   # Evening 7–11pm — highest traffic
+    ],
+    "X (Twitter)": [
+        (8,  10, "weekday"),  # Morning commute
+        (12, 13, "weekday"),  # Lunch
+        (18, 21, "any"),      # Evening scroll
+    ],
+}
+
+# How urgency is worded based on hours until next peak
+def _urgency_label(hours_until: int) -> str:
+    if hours_until <= 1:
+        return "🔴 POST NOW"
+    elif hours_until <= 3:
+        return "🟠 Post soon"
+    elif hours_until <= 6:
+        return "🟡 Post today"
+    else:
+        return "🟢 Schedule ahead"
+
+def get_best_post_times(trend_hour: int | None = None) -> dict:
+    """
+    Calculate best posting times for each platform.
+    trend_hour: UTC hour the trend was detected (0–23)
+    Returns dict of platform -> { time_str, urgency, reason }
+    """
+    now_utc = datetime.now(timezone.utc)
+    current_hour = trend_hour if trend_hour is not None else now_utc.hour
+    weekday = now_utc.strftime("%a")  # Mon, Tue... Fri, Sat, Sun
+
+    is_weekend = weekday in ("Sat", "Sun")
+    is_weekday = not is_weekend
+
+    results = {}
+
+    for platform, windows in PLATFORM_PEAK_HOURS.items():
+        best_window  = None
+        min_distance = 999
+
+        for (start, end, day_type) in windows:
+            # Check if this window applies today
+            if day_type not in ("any",) and day_type != weekday and day_type != ("weekday" if is_weekday else "weekend"):
+                continue
+
+            # Distance from current hour to window start
+            dist = (start - current_hour) % 24
+            if dist < min_distance:
+                min_distance = dist
+                best_window  = (start, end, day_type)
+
+        if best_window:
+            start, end, _ = best_window
+            urgency = _urgency_label(min_distance)
+
+            # Format time as 12h
+            def fmt(h):
+                suffix = "am" if h < 12 else "pm"
+                h12    = h if h <= 12 else h - 12
+                h12    = 12 if h12 == 0 else h12
+                return f"{h12}{suffix}"
+
+            time_str = f"{fmt(start)}–{fmt(end)}"
+            day_str  = weekday if _ == weekday else ("weekdays" if _ == "weekday" else "daily")
+
+            results[platform] = {
+                "time":    time_str,
+                "urgency": urgency,
+                "day":     day_str,
+                "hours_until": min_distance,
+            }
+        else:
+            results[platform] = {
+                "time":    "7pm–10pm",
+                "urgency": "🟢 Schedule ahead",
+                "day":     "any day",
+                "hours_until": 12,
+            }
+
+    return results
 
 
 # ─── Trend Detection ─────────────────────────────────────────
@@ -54,10 +147,7 @@ def get_google_trends(keywords: list[str]) -> list[dict]:
 
 
 def get_dexscreener_trending_names() -> list[str]:
-    """
-    Pull trending Solana token names to use as content seeds.
-    This feeds the CONTENT engine only — not trading signals.
-    """
+    """Pull trending Solana token names to use as content seeds only."""
     try:
         url = "https://api.dexscreener.com/token-boosts/top/v1"
         res = requests.get(url, timeout=10)
@@ -74,14 +164,11 @@ def get_dexscreener_trending_names() -> list[str]:
         print(f"[trends] DexScreener name fetch error: {e}")
         return []
 
-# ─── AI-Powered Idea Generator (Gemini) ──────────────────────
+
+# ─── AI Idea Generator (Gemini) ──────────────────────────────
 
 def generate_ai_content_ideas(topic: str, category: str = "general") -> dict | None:
-    """
-    Use Google Gemini to generate unique animation content ideas.
-    Reads the API key from the ANTHROPIC_API_KEY env variable.
-    Falls back to templates if the key is missing or the call fails.
-    """
+    """Use Gemini to generate unique animation content ideas."""
     api_key = GEMINI_API_KEY
     if not api_key:
         return None
@@ -93,7 +180,7 @@ def generate_ai_content_ideas(topic: str, category: str = "general") -> dict | N
         print("[trends] google-generativeai not installed — falling back to templates")
         return None
 
-    prompt = f"""You are a creative director for an animation studio that makes short-form content for YouTube, TikTok, and X (Twitter).
+    prompt = f"""You are a creative director for an animation studio making short-form content for YouTube, TikTok, and X (Twitter).
 
 Generate 2 unique, specific, and engaging animation video ideas for each platform about this topic: "{topic}"
 Category: {category}
@@ -106,7 +193,7 @@ Rules:
 - X (Twitter): a meme angle, loop, or animated reaction post
 - Be creative and specific — avoid generic titles
 
-Respond ONLY with a valid JSON object in this exact format, no extra text:
+Respond ONLY with a valid JSON object, no extra text:
 {{
   "YouTube": ["idea one", "idea two"],
   "TikTok": ["idea one", "idea two"],
@@ -121,7 +208,6 @@ Respond ONLY with a valid JSON object in this exact format, no extra text:
         response = model.generate_content(prompt)
         raw = response.text.strip()
 
-        # Strip markdown fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -136,6 +222,9 @@ Respond ONLY with a valid JSON object in this exact format, no extra text:
             "general":   ["#animation", "#trending", "#viral", "#contentcreator", "#animated"],
         }
 
+        now_hour   = datetime.now(timezone.utc).hour
+        post_times = get_best_post_times(trend_hour=now_hour)
+
         return {
             "topic":      topic,
             "category":   category,
@@ -143,6 +232,7 @@ Respond ONLY with a valid JSON object in this exact format, no extra text:
             "ideas":      ideas,
             "hashtags":   hashtag_sets.get(category, hashtag_sets["general"]),
             "timestamp":  datetime.utcnow().strftime("%H:%M UTC"),
+            "post_times": post_times,
             "ai_powered": True,
         }
 
@@ -150,7 +240,8 @@ Respond ONLY with a valid JSON object in this exact format, no extra text:
         print(f"[trends] Gemini idea generation failed: {e}")
         return None
 
-# ─── Template-based Fallback ─────────────────────────────────
+
+# ─── Template Fallback ───────────────────────────────────────
 
 TEMPLATES = {
     "crypto": {
@@ -239,16 +330,11 @@ STATUS_LABELS = ["Rising 📈", "Hot 🔥", "Viral Early Stage ⚡", "Trending N
 
 
 def generate_content_ideas(topic: str, category: str = "general") -> dict:
-    """
-    Generate animation content ideas for a topic.
-    Tries AI first, falls back to templates if AI unavailable.
-    """
-    # Try AI generation first
+    """Generate animation content ideas. Tries AI first, falls back to templates."""
     ai_result = generate_ai_content_ideas(topic, category)
     if ai_result:
         return ai_result
 
-    # Template fallback
     category  = category if category in TEMPLATES else "general"
     templates = TEMPLATES[category]
     hashtags  = HASHTAG_SETS.get(category, HASHTAG_SETS["general"])
@@ -259,6 +345,9 @@ def generate_content_ideas(topic: str, category: str = "general") -> dict:
         selected = random.sample(platform_templates, min(2, len(platform_templates)))
         ideas[platform] = [t.format(topic=topic) for t in selected]
 
+    now_hour   = datetime.now(timezone.utc).hour
+    post_times = get_best_post_times(trend_hour=now_hour)
+
     return {
         "topic":      topic,
         "category":   category,
@@ -266,39 +355,33 @@ def generate_content_ideas(topic: str, category: str = "general") -> dict:
         "ideas":      ideas,
         "hashtags":   hashtags,
         "timestamp":  datetime.utcnow().strftime("%H:%M UTC"),
+        "post_times": post_times,
         "ai_powered": False,
     }
 
 
 def get_trending_content_ideas() -> list[dict]:
-    """
-    Master function — pulls trends and returns content ideas.
-    Called by the scheduler and /trending command.
-    """
+    """Master function — pulls trends and returns content ideas."""
     results = []
 
-    # 1. Google Trends — crypto keywords
     crypto_trends = get_google_trends(CRYPTO_KEYWORDS)
     for trend in crypto_trends[:2]:
         idea = generate_content_ideas(trend["keyword"], category="crypto")
         idea["trend_score"] = trend["value"]
         results.append(idea)
 
-    # 2. Google Trends — lifestyle keywords
     lifestyle_trends = get_google_trends(LIFESTYLE_KEYWORDS)
     for trend in lifestyle_trends[:1]:
         idea = generate_content_ideas(trend["keyword"], category="lifestyle")
         idea["trend_score"] = trend["value"]
         results.append(idea)
 
-    # 3. Google Trends — animation keywords
     anim_trends = get_google_trends(ANIMATION_KEYWORDS)
     for trend in anim_trends[:1]:
         idea = generate_content_ideas(trend["keyword"], category="meme")
         idea["trend_score"] = trend["value"]
         results.append(idea)
 
-    # 4. Fallback — preset topics if Google Trends fails
     if not results:
         fallback_topics = [
             ("AI replacing jobs",  "general"),

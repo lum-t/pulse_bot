@@ -10,13 +10,20 @@ load_dotenv()
 
 # ─── Telegram ────────────────────────────────────────────────
 TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID")        # private chat for commands
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")    # channel for public alerts
+TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 
 # Admin IDs — only these 2 users can command the bot
 ADMIN_IDS = set(filter(None, [
     os.getenv("ADMIN_1_ID"),
     os.getenv("ADMIN_2_ID"),
+]))
+
+# Admin Chat IDs — private DM chat IDs for each admin
+# Bot will send alerts directly to both admins + the channel
+ADMIN_CHAT_IDS = list(filter(None, [
+    os.getenv("ADMIN_1_CHAT_ID"),
+    os.getenv("ADMIN_2_CHAT_ID"),
 ]))
 
 # ─── Scheduler intervals ─────────────────────────────────────
@@ -30,7 +37,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "Africa/Lagos")
 
 # ─── Rate Limiting ───────────────────────────────────────────
-# Seconds an admin must wait between the same command
 RATE_LIMIT_SECONDS = 30
 
 # ─── DexScreener ─────────────────────────────────────────────
@@ -45,26 +51,44 @@ NEW_TOKEN_HOURS         = 24
 
 # ─── Signal History ──────────────────────────────────────────
 HISTORY_FILE     = "signal_history.json"
-MAX_HISTORY_SIZE = 50   # keep last 50 signals
+MAX_HISTORY_SIZE = 50
 
 # ─── Trend Keywords ──────────────────────────────────────────
+# CRYPTO: specific coin names + crypto-native phrases only
+# Avoids single words like "solana" that can match celebrities/athletes
 CRYPTO_KEYWORDS = [
-    "solana", "memecoin", "SOL", "pump fun",
-    "BONK", "WIF", "POPCAT", "crypto meme"
+    "solana crypto",
+    "memecoin 2025",
+    "pump fun token",
+    "BONK coin",
+    "WIF token",
+    "POPCAT crypto",
+    "crypto meme coin",
+    "solana meme token",
 ]
 
 LIFESTYLE_KEYWORDS = [
-    "day in my life", "morning routine", "vlog",
-    "aesthetic", "grwm", "silent vlog"
+    "day in my life",
+    "morning routine vlog",
+    "silent vlog",
+    "aesthetic vlog",
+    "grwm 2025",
+    "content creator life",
 ]
 
 ANIMATION_KEYWORDS = [
-    "animation meme", "animated video", "2d animation",
-    "motion graphics", "animator life", "cartoon meme"
+    "animation meme",
+    "animated short film",
+    "2d animation trend",
+    "motion graphics viral",
+    "animator life",
+    "AI animation video",
 ]
 
 GENERAL_TRENDING = [
-    "trending", "viral", "tiktok trend"
+    "trending video idea",
+    "viral tiktok trend",
+    "youtube shorts idea",
 ]
 
 # ─── Content Templates ───────────────────────────────────────
