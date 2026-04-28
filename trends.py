@@ -32,7 +32,7 @@ from config import (
 log = logging.getLogger(__name__)
 
 genai.configure(api_key=GEMINI_API_KEY)
-gemini = genai.GenerativeModel("gemini-1.5-flash")
+gemini = genai.GenerativeModel("gemini-2.0-flash")
 
 # ─── Google Trends ────────────────────────────────────────────
 
