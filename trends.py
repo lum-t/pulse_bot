@@ -1,410 +1,358 @@
 """
-trends.py — PULSE Content Intelligence
-Trend detection + AI-powered animation content idea generator
-Now includes: best time to post per platform based on trend timing
+trends.py — PULSE Content Engine
+Fetches trending topics via Google Trends (pytrends) + generates
+platform-specific content ideas via Gemini AI.
+
+Keyword discovery is fully AI-driven: Gemini generates fresh, relevant
+search keywords every run instead of relying on static config lists.
+Static lists (ANIMATION_KEYWORDS, LIFESTYLE_KEYWORDS, GENERAL_TRENDING)
+are only used as a fallback if Gemini is unavailable.
 """
 
-import os
-import random
 import json
-import requests
+import logging
+import time
+import random
 from datetime import datetime, timezone
 
-try:
-    from pytrends.request import TrendReq
-    PYTRENDS_AVAILABLE = True
-except ImportError:
-    PYTRENDS_AVAILABLE = False
+import requests
+from pytrends.request import TrendReq
+
+import google.generativeai as genai
 
 from config import (
-    CRYPTO_KEYWORDS, LIFESTYLE_KEYWORDS,
-    ANIMATION_KEYWORDS, GENERAL_TRENDING,
-    PLATFORMS, GEMINI_API_KEY, DEFAULT_TIMEZONE
+    GEMINI_API_KEY,
+    LIFESTYLE_KEYWORDS,
+    ANIMATION_KEYWORDS,
+    GENERAL_TRENDING,
+    PLATFORMS,
+    DEFAULT_TIMEZONE,
 )
 
+log = logging.getLogger(__name__)
 
-# ─── Best Time To Post Engine ────────────────────────────────
+genai.configure(api_key=GEMINI_API_KEY)
+gemini = genai.GenerativeModel("gemini-1.5-flash")
 
-# Peak engagement windows per platform (hour ranges in local time)
-PLATFORM_PEAK_HOURS = {
-    "YouTube": [
-        (14, 16, "Fri"),   # Friday 2–4pm
-        (15, 17, "Sat"),   # Saturday 3–5pm
-        (14, 16, "Sun"),   # Sunday 2–4pm
-        (17, 19, "weekday"),  # Weekday 5–7pm
-    ],
-    "TikTok": [
-        (7,  9,  "any"),   # Morning 7–9am
-        (12, 15, "any"),   # Lunch 12–3pm
-        (19, 23, "any"),   # Evening 7–11pm — highest traffic
-    ],
-    "X (Twitter)": [
-        (8,  10, "weekday"),  # Morning commute
-        (12, 13, "weekday"),  # Lunch
-        (18, 21, "any"),      # Evening scroll
-    ],
-}
+# ─── Google Trends ────────────────────────────────────────────
 
-# How urgency is worded based on hours until next peak
-def _urgency_label(hours_until: int) -> str:
-    if hours_until <= 1:
-        return "🔴 POST NOW"
-    elif hours_until <= 3:
-        return "🟠 Post soon"
-    elif hours_until <= 6:
-        return "🟡 Post today"
-    else:
-        return "🟢 Schedule ahead"
+def _build_pytrends() -> TrendReq:
+    return TrendReq(
+        hl="en-US",
+        tz=0,
+        timeout=(10, 25),
+        retries=3,
+        backoff_factor=1.5,
+    )
 
-def get_best_post_times(trend_hour: int | None = None) -> dict:
+
+def _fetch_trend_score(keyword: str, pytrends: TrendReq, retries: int = 3) -> int:
     """
-    Calculate best posting times for each platform.
-    trend_hour: UTC hour the trend was detected (0–23)
-    Returns dict of platform -> { time_str, urgency, reason }
+    Return a 0–100 Google Trends interest score for a keyword.
+    Retries with exponential backoff on 429. Falls back to 0 on failure.
     """
-    now_utc = datetime.now(timezone.utc)
-    current_hour = trend_hour if trend_hour is not None else now_utc.hour
-    weekday = now_utc.strftime("%a")  # Mon, Tue... Fri, Sat, Sun
-
-    is_weekend = weekday in ("Sat", "Sun")
-    is_weekday = not is_weekend
-
-    results = {}
-
-    for platform, windows in PLATFORM_PEAK_HOURS.items():
-        best_window  = None
-        min_distance = 999
-
-        for (start, end, day_type) in windows:
-            # Check if this window applies today
-            if day_type not in ("any",) and day_type != weekday and day_type != ("weekday" if is_weekday else "weekend"):
-                continue
-
-            # Distance from current hour to window start
-            dist = (start - current_hour) % 24
-            if dist < min_distance:
-                min_distance = dist
-                best_window  = (start, end, day_type)
-
-        if best_window:
-            start, end, _ = best_window
-            urgency = _urgency_label(min_distance)
-
-            # Format time as 12h
-            def fmt(h):
-                suffix = "am" if h < 12 else "pm"
-                h12    = h if h <= 12 else h - 12
-                h12    = 12 if h12 == 0 else h12
-                return f"{h12}{suffix}"
-
-            time_str = f"{fmt(start)}–{fmt(end)}"
-            day_str  = weekday if _ == weekday else ("weekdays" if _ == "weekday" else "daily")
-
-            results[platform] = {
-                "time":    time_str,
-                "urgency": urgency,
-                "day":     day_str,
-                "hours_until": min_distance,
-            }
-        else:
-            results[platform] = {
-                "time":    "7pm–10pm",
-                "urgency": "🟢 Schedule ahead",
-                "day":     "any day",
-                "hours_until": 12,
-            }
-
-    return results
+    for attempt in range(retries):
+        try:
+            # Polite delay between requests to avoid rate limiting
+            time.sleep(random.uniform(2.5, 5.0))
+            pytrends.build_payload([keyword], timeframe="now 1-d", geo="")
+            data = pytrends.interest_over_time()
+            if data.empty:
+                return 0
+            return int(data[keyword].iloc[-1])
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str:
+                wait = (2 ** attempt) * 10 + random.uniform(0, 5)
+                log.warning(
+                    f"[trends] 429 rate limit on '{keyword}' "
+                    f"(attempt {attempt+1}/{retries}). Waiting {wait:.1f}s..."
+                )
+                time.sleep(wait)
+            else:
+                log.warning(f"[trends] Trend score error for '{keyword}': {e}")
+                return 0
+    log.error(f"[trends] All retries exhausted for '{keyword}' — skipping.")
+    return 0
 
 
-# ─── Trend Detection ─────────────────────────────────────────
-
-def get_google_trends(keywords: list[str]) -> list[dict]:
-    """Fetch rising trends from Google Trends for given keywords."""
-    if not PYTRENDS_AVAILABLE:
-        return []
-    try:
-        pt = TrendReq(hl="en-US", tz=0, timeout=(10, 25))
-        pt.build_payload(keywords[:5], timeframe="now 1-d", geo="")
-        related = pt.related_queries()
-
-        rising = []
-        for kw in keywords[:5]:
-            df = related.get(kw, {}).get("rising")
-            if df is not None and not df.empty:
-                for _, row in df.head(3).iterrows():
-                    rising.append({
-                        "keyword": row["query"],
-                        "value":   int(row["value"]),
-                        "source":  "Google Trends",
-                        "seed":    kw,
-                    })
-        return rising
-
-    except Exception as e:
-        print(f"[trends] Google Trends error: {e}")
-        return []
+def _get_realtime_trending(retries: int = 3) -> list[str]:
+    """
+    Pull Google Trends realtime trending searches (US).
+    Returns a list of topic strings. Retries with backoff on 429.
+    """
+    for attempt in range(retries):
+        try:
+            time.sleep(random.uniform(1.0, 3.0))
+            pt = _build_pytrends()
+            df = pt.trending_searches(pn="united_states")
+            return df[0].tolist()[:10]
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str:
+                wait = (2 ** attempt) * 10 + random.uniform(0, 5)
+                log.warning(
+                    f"[trends] 429 on realtime fetch "
+                    f"(attempt {attempt+1}/{retries}). Waiting {wait:.1f}s..."
+                )
+                time.sleep(wait)
+            else:
+                log.warning(f"[trends] Realtime trending fetch failed: {e}")
+                return []
+    log.error("[trends] Realtime trending fetch failed after all retries.")
+    return []
 
 
-def get_dexscreener_trending_names() -> list[str]:
-    """Pull trending Solana token names to use as content seeds only."""
-    try:
-        url = "https://api.dexscreener.com/token-boosts/top/v1"
-        res = requests.get(url, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        names = []
-        for item in data:
-            if item.get("chainId", "").lower() == "solana":
-                desc = item.get("description", "")
-                if desc:
-                    names.append(desc.split()[0])
-        return names[:5]
-    except Exception as e:
-        print(f"[trends] DexScreener name fetch error: {e}")
-        return []
+# ─── Gemini keyword generation ────────────────────────────────
 
+def _gemini_generate_keywords() -> dict[str, list[str]]:
+    """
+    Ask Gemini to generate fresh, relevant keyword buckets for
+    animation and lifestyle content — replacing static config lists.
 
-# ─── AI Idea Generator (Gemini) ──────────────────────────────
+    Returns a dict like:
+        {
+            "animation": ["keyword1", ...],
+            "lifestyle": ["keyword1", ...],
+            "general":   ["keyword1", ...],
+        }
 
-def generate_ai_content_ideas(topic: str, category: str = "general") -> dict | None:
-    """Use Gemini to generate unique animation content ideas."""
-    api_key = GEMINI_API_KEY
-    if not api_key:
-        return None
+    Falls back to static config lists if Gemini is unavailable.
+    """
+    if not GEMINI_API_KEY:
+        log.warning("[trends] No Gemini API key — using static keyword fallback.")
+        return _static_keyword_fallback()
 
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-    except ImportError:
-        print("[trends] google-generativeai not installed — falling back to templates")
-        return None
+    prompt = """You are a trend researcher for a content creator who makes animation and lifestyle content.
 
-    prompt = f"""You are a creative director for an animation studio making short-form content for YouTube, TikTok, and X (Twitter).
+Your job is to suggest Google Trends search keywords that are likely to have HIGH search interest RIGHT NOW.
 
-Generate 2 unique, specific, and engaging animation video ideas for each platform about this topic: "{topic}"
-Category: {category}
+Think about:
+- Viral formats and challenges sweeping social media
+- Pop culture moments (movies, shows, music, celebrities)
+- Creator and YouTube meta trends
+- Aesthetic movements and visual styles
+- Animation techniques and styles gaining popularity
+- Everyday lifestyle topics people are actively searching
 
 Rules:
-- Ideas must be animation-specific (not generic video ideas)
-- Each idea should have a hook, a clear concept, and feel fresh
-- TikTok ideas: short, punchy, under 60 seconds
-- YouTube ideas: longer concept, story-driven or educational
-- X (Twitter): a meme angle, loop, or animated reaction post
-- Be creative and specific — avoid generic titles
+- Keywords must be short (1–4 words), natural search phrases
+- No crypto, finance, or political keywords
+- Prioritise topics relevant to Gen Z and millennial audiences
+- Make them specific enough to return real Google Trends data
 
-Respond ONLY with a valid JSON object, no extra text:
-{{
-  "YouTube": ["idea one", "idea two"],
-  "TikTok": ["idea one", "idea two"],
-  "X (Twitter)": ["idea one", "idea two"]
-}}"""
+Respond ONLY in this exact JSON format, no markdown, no extra text:
+{
+  "animation": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
+  "lifestyle": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
+  "general":   ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"]
+}"""
 
     try:
-        model = genai.GenerativeModel(
-            "gemini-1.5-flash",
-            generation_config={"response_mime_type": "application/json"}
-        )
-        response = model.generate_content(prompt)
-        raw = response.text.strip()
+        response = gemini.generate_content(prompt)
+        text = response.text.strip()
+        text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(text)
 
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        ideas = json.loads(raw.strip())
+        required = {"animation", "lifestyle", "general"}
+        if not required.issubset(parsed.keys()):
+            raise ValueError(f"Missing keyword buckets in Gemini response: {parsed.keys()}")
 
-        status_labels = ["Rising 📈", "Hot 🔥", "Viral Early Stage ⚡", "Trending Now 🌊"]
-        hashtag_sets  = {
-            "crypto":    ["#memecoin", "#Solana", "#crypto", "#SOL", "#animation", "#cryptoanimation"],
-            "lifestyle": ["#animatorlife", "#dayinmylife", "#contentcreator", "#animation", "#vlog"],
-            "meme":      ["#meme", "#animation", "#viral", "#animatedmeme", "#funny"],
-            "general":   ["#animation", "#trending", "#viral", "#contentcreator", "#animated"],
-        }
-
-        now_hour   = datetime.now(timezone.utc).hour
-        post_times = get_best_post_times(trend_hour=now_hour)
-
-        return {
-            "topic":      topic,
-            "category":   category,
-            "status":     random.choice(status_labels),
-            "ideas":      ideas,
-            "hashtags":   hashtag_sets.get(category, hashtag_sets["general"]),
-            "timestamp":  datetime.utcnow().strftime("%H:%M UTC"),
-            "post_times": post_times,
-            "ai_powered": True,
-        }
+        log.info(f"[trends] Gemini generated keywords: {parsed}")
+        return parsed
 
     except Exception as e:
-        print(f"[trends] Gemini idea generation failed: {e}")
-        return None
+        log.error(f"[trends] Gemini keyword generation failed: {e} — using static fallback.")
+        return _static_keyword_fallback()
 
 
-# ─── Template Fallback ───────────────────────────────────────
-
-TEMPLATES = {
-    "crypto": {
-        "YouTube": [
-            "The {topic} story — fully animated breakdown",
-            "What actually happens when {topic} pumps (animated)",
-            "I animated the {topic} crash and it's hilarious",
-            "Explaining {topic} to your grandma — animation",
-        ],
-        "TikTok": [
-            "POV: you bought {topic} before Twitter found it (animated)",
-            "Animated {topic} in 30 seconds",
-            "{topic} right now — animated reaction",
-            "When {topic} does a 10x (stick figure edition)",
-        ],
-        "X (Twitter)": [
-            "Animated thread: everything you need to know about {topic}",
-            "I made a {topic} animation and now I can't stop",
-            "{topic} explained in one animated loop",
-        ],
-    },
-    "lifestyle": {
-        "YouTube": [
-            "Animated day in my life as a creator (no talking)",
-            "My morning routine but make it animated",
-            "What my week actually looks like — animated vlog",
-            "Animator vs procrastination — day in the life",
-        ],
-        "TikTok": [
-            "POV: animator morning routine (animated obviously)",
-            "Silent animated vlog — {topic} edition",
-            "Day in my life but every scene is animated",
-            "What {topic} looks like when you animate it",
-        ],
-        "X (Twitter)": [
-            "Animated my daily routine and it exposed me",
-            "Nobody talks about the {topic} side of being a creator",
-            "Made a 10 second animated vlog — drop yours below",
-        ],
-    },
-    "meme": {
-        "YouTube": [
-            "I animated the {topic} meme and it slaps",
-            "Every {topic} meme but animated — compilation",
-            "Animating viral tweets about {topic}",
-        ],
-        "TikTok": [
-            "Animated {topic} meme — tell me you've seen this",
-            "I turned the {topic} meme into an animation",
-            "POV: {topic} but make it animated",
-            "{topic} meme animated in 60 seconds",
-        ],
-        "X (Twitter)": [
-            "Animated the {topic} meme nobody asked for",
-            "What if {topic} was an animated series",
-            "I animated this so you don't have to — {topic}",
-        ],
-    },
-    "general": {
-        "YouTube": [
-            "Animated explainer: why everyone is talking about {topic}",
-            "{topic} in 2025 — animated summary",
-            "The {topic} iceberg — animated deep dive",
-        ],
-        "TikTok": [
-            "Wait — {topic}? Animated reaction",
-            "Explaining {topic} with animations in 30 sec",
-            "Nobody animated {topic} yet so I did",
-        ],
-        "X (Twitter)": [
-            "Animated take on {topic} — thoughts?",
-            "Made a quick animation about {topic}",
-            "{topic} but I animated it",
-        ],
-    },
-}
-
-HASHTAG_SETS = {
-    "crypto":    ["#memecoin", "#Solana", "#crypto", "#SOL", "#animation", "#cryptoanimation"],
-    "lifestyle": ["#animatorlife", "#dayinmylife", "#contentcreator", "#animation", "#vlog"],
-    "meme":      ["#meme", "#animation", "#viral", "#animatedmeme", "#funny"],
-    "general":   ["#animation", "#trending", "#viral", "#contentcreator", "#animated"],
-}
-
-STATUS_LABELS = ["Rising 📈", "Hot 🔥", "Viral Early Stage ⚡", "Trending Now 🌊"]
-
-
-def generate_content_ideas(topic: str, category: str = "general") -> dict:
-    """Generate animation content ideas. Tries AI first, falls back to templates."""
-    ai_result = generate_ai_content_ideas(topic, category)
-    if ai_result:
-        return ai_result
-
-    category  = category if category in TEMPLATES else "general"
-    templates = TEMPLATES[category]
-    hashtags  = HASHTAG_SETS.get(category, HASHTAG_SETS["general"])
-
-    ideas = {}
-    for platform in PLATFORMS:
-        platform_templates = templates.get(platform, templates["TikTok"])
-        selected = random.sample(platform_templates, min(2, len(platform_templates)))
-        ideas[platform] = [t.format(topic=topic) for t in selected]
-
-    now_hour   = datetime.now(timezone.utc).hour
-    post_times = get_best_post_times(trend_hour=now_hour)
-
+def _static_keyword_fallback() -> dict[str, list[str]]:
+    """Returns the original static config lists as a safe fallback."""
     return {
-        "topic":      topic,
-        "category":   category,
-        "status":     random.choice(STATUS_LABELS),
-        "ideas":      ideas,
-        "hashtags":   hashtags,
-        "timestamp":  datetime.utcnow().strftime("%H:%M UTC"),
-        "post_times": post_times,
-        "ai_powered": False,
+        "animation": ANIMATION_KEYWORDS,
+        "lifestyle": LIFESTYLE_KEYWORDS,
+        "general":   GENERAL_TRENDING,
     }
 
 
-def get_trending_content_ideas() -> list[dict]:
-    """Master function — pulls trends and returns content ideas."""
-    results = []
+# ─── Gemini idea generation ───────────────────────────────────
 
-    crypto_trends = get_google_trends(CRYPTO_KEYWORDS)
-    for trend in crypto_trends[:2]:
-        idea = generate_content_ideas(trend["keyword"], category="crypto")
-        idea["trend_score"] = trend["value"]
-        results.append(idea)
+def _gemini_generate_ideas(topic: str, category: str, trend_score: int) -> dict:
+    """
+    Ask Gemini to generate platform-specific content ideas for a topic.
+    Returns structured ideas dict ready for format_content_alert().
+    """
+    if not GEMINI_API_KEY:
+        return _fallback_idea(topic, category, trend_score)
 
-    lifestyle_trends = get_google_trends(LIFESTYLE_KEYWORDS)
-    for trend in lifestyle_trends[:1]:
-        idea = generate_content_ideas(trend["keyword"], category="lifestyle")
-        idea["trend_score"] = trend["value"]
-        results.append(idea)
+    prompt = f"""You are a viral content strategist for a creator who makes animation and lifestyle content.
 
-    anim_trends = get_google_trends(ANIMATION_KEYWORDS)
-    for trend in anim_trends[:1]:
-        idea = generate_content_ideas(trend["keyword"], category="meme")
-        idea["trend_score"] = trend["value"]
-        results.append(idea)
+TRENDING TOPIC: "{topic}"
+CATEGORY: {category}
+GOOGLE TREND SCORE: {trend_score}/100
 
-    if not results:
-        fallback_topics = [
-            ("AI replacing jobs",  "general"),
-            ("animator life",      "lifestyle"),
-            ("memecoin season",    "crypto"),
-            ("viral meme format",  "meme"),
-        ]
-        for topic, cat in fallback_topics[:2]:
-            results.append(generate_content_ideas(topic, category=cat))
+Generate creative, specific content ideas for this creator. Focus on animation, lifestyle vlogging, and general entertainment angles. Do NOT generate crypto or financial content.
 
-    return results
+Respond ONLY in this exact JSON format, no markdown, no extra text:
+{{
+  "ideas": {{
+    "YouTube": ["idea 1", "idea 2"],
+    "TikTok": ["idea 1", "idea 2"],
+    "X (Twitter)": ["idea 1", "idea 2"]
+  }},
+  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"],
+  "post_times": {{
+    "YouTube": {{"time": "6:00 PM", "day": "Saturday", "urgency": "🔥 Peak weekend views", "hours_until": 8}},
+    "TikTok": {{"time": "7:00 PM", "day": "Today", "urgency": "⚡ Post now", "hours_until": 2}},
+    "X (Twitter)": {{"time": "12:00 PM", "day": "Tomorrow", "urgency": "📅 Schedule it", "hours_until": 18}}
+  }}
+}}"""
+
+    try:
+        response = gemini.generate_content(prompt)
+        text = response.text.strip()
+        text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(text)
+
+        return {
+            "topic":        topic,
+            "category":     category,
+            "status":       _trend_status(trend_score),
+            "trend_score":  trend_score,
+            "timestamp":    datetime.now(timezone.utc).strftime("%d %b %H:%M UTC"),
+            "ideas":        parsed.get("ideas", _default_ideas(topic)),
+            "hashtags":     parsed.get("hashtags", [f"#{topic.replace(' ', '')}"]),
+            "post_times":   parsed.get("post_times", _default_post_times()),
+            "ai_powered":   True,
+        }
+
+    except Exception as e:
+        log.error(f"[trends] Gemini idea generation failed for '{topic}': {e}")
+        return _fallback_idea(topic, category, trend_score)
+
+
+def _trend_status(score: int) -> str:
+    if score >= 75:
+        return "🔥 Viral"
+    if score >= 50:
+        return "📈 Trending"
+    if score >= 25:
+        return "🌱 Rising"
+    return "💡 Niche"
+
+
+def _default_ideas(topic: str) -> dict:
+    return {
+        "YouTube":     [f"My honest take on {topic}", f"I tried {topic} for a week"],
+        "TikTok":      [f"{topic} POV animation", f"Reacting to {topic}"],
+        "X (Twitter)": [f"Thread: everything about {topic}", f"Hot take on {topic}"],
+    }
+
+
+def _default_post_times() -> dict:
+    return {
+        "YouTube":     {"time": "6:00 PM", "day": "Saturday",  "urgency": "🔥 Best reach",   "hours_until": 8},
+        "TikTok":      {"time": "7:00 PM", "day": "Today",     "urgency": "⚡ Post tonight",  "hours_until": 3},
+        "X (Twitter)": {"time": "12:00 PM","day": "Tomorrow",  "urgency": "📅 Schedule it",   "hours_until": 18},
+    }
+
+
+def _fallback_idea(topic: str, category: str, trend_score: int) -> dict:
+    """Used when Gemini is unavailable — returns basic templated ideas."""
+    return {
+        "topic":       topic,
+        "category":    category,
+        "status":      _trend_status(trend_score),
+        "trend_score": trend_score,
+        "timestamp":   datetime.now(timezone.utc).strftime("%d %b %H:%M UTC"),
+        "ideas":       _default_ideas(topic),
+        "hashtags":    [f"#{w.replace(' ', '')}" for w in topic.split()[:3]] + ["#ContentCreator", "#Animation"],
+        "post_times":  _default_post_times(),
+        "ai_powered":  False,
+    }
+
+
+# ─── Public API ───────────────────────────────────────────────
+
+def get_trending_content_ideas(max_results: int = 4) -> list[dict]:
+    """
+    Main trend detection pipeline:
+    1. Pull Google realtime trending topics
+    2. Ask Gemini to generate fresh keyword buckets (animation / lifestyle / general)
+    3. Score all keywords against Google Trends (with polite delays + 429 backoff)
+    4. Generate Gemini-powered ideas for the top hits
+    Returns a list of idea dicts ready for format_content_alert().
+    """
+    pt    = _build_pytrends()
+    ideas = []
+    seen  = set()
+
+    # Step 1 — Google realtime trending
+    realtime = _get_realtime_trending()
+
+    # Step 2 — AI-generated keyword buckets
+    ai_keywords = _gemini_generate_keywords()
+
+    # Build keyword pool: realtime first, then AI-generated buckets
+    keyword_pool: list[tuple[str, str]] = []
+
+    for topic in realtime:
+        keyword_pool.append((topic, "general"))
+
+    for category, keywords in ai_keywords.items():
+        for kw in keywords:
+            keyword_pool.append((kw, category))
+
+    # Step 3 — Score and collect (capped to limit API calls)
+    scored: list[tuple[int, str, str]] = []
+    cap = 15  # Reduced from 20 to be gentler on Google's rate limits
+
+    for keyword, category in keyword_pool[:cap]:
+        if keyword.lower() in seen:
+            continue
+        seen.add(keyword.lower())
+
+        score = _fetch_trend_score(keyword, pt)
+        if score >= 50:
+            scored.append((score, keyword, category))
+
+    # Sort by score descending
+    scored.sort(reverse=True)
+
+    # Step 4 — Generate ideas for top N
+    for score, keyword, category in scored[:max_results]:
+        idea = _gemini_generate_ideas(keyword, category, score)
+        ideas.append(idea)
+
+    # If Google Trends returned nothing usable, generate ideas from AI keywords directly
+    if not ideas:
+        log.warning("[trends] No scored results — generating ideas from AI keywords directly.")
+        for category, keywords in ai_keywords.items():
+            if len(ideas) >= max_results:
+                break
+            for kw in keywords[:1]:
+                idea = _gemini_generate_ideas(kw, category, trend_score=0)
+                ideas.append(idea)
+                if len(ideas) >= max_results:
+                    break
+
+    return ideas
 
 
 def get_ideas_for_topic(topic: str) -> dict:
-    """Generate ideas for a specific user-requested topic."""
+    """
+    Generate content ideas for a specific topic (used by /ideas command).
+    Fetches a live trend score then runs Gemini generation.
+    """
+    pt    = _build_pytrends()
+    score = _fetch_trend_score(topic, pt)
+
     topic_lower = topic.lower()
-    if any(k in topic_lower for k in ["coin", "token", "crypto", "sol", "pump", "degen"]):
-        category = "crypto"
-    elif any(k in topic_lower for k in ["life", "routine", "vlog", "day", "morning"]):
+    if any(kw in topic_lower for kw in ["animat", "motion", "2d", "3d", "cartoon"]):
+        category = "animation"
+    elif any(kw in topic_lower for kw in ["vlog", "routine", "grwm", "aesthetic", "life"]):
         category = "lifestyle"
-    elif any(k in topic_lower for k in ["meme", "funny", "viral", "trend"]):
-        category = "meme"
     else:
         category = "general"
 
-    return generate_content_ideas(topic, category=category)
+    return _gemini_generate_ideas(topic, category, score)

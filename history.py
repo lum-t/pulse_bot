@@ -27,15 +27,17 @@ def save_signal(signal: dict):
     """Save a detected signal to history."""
     data = _load()
     entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "name":      signal.get("name", "Unknown"),
-        "symbol":    signal.get("symbol", "???"),
-        "price_usd": signal.get("price_usd", "N/A"),
-        "dex_url":   signal.get("dex_url", ""),
-        "bullish":   signal["probability"]["bullish"],
-        "bearish":   signal["probability"]["bearish"],
+        "timestamp":       datetime.now(timezone.utc).isoformat(),
+        "name":            signal.get("name", "Unknown"),
+        "symbol":          signal.get("symbol", "???"),
+        "price_usd":       signal.get("price_usd", "N/A"),
+        "dex_url":         signal.get("dex_url", ""),
+        "token_address":   signal.get("token_address") or signal.get("address", ""),
+        "gemini_score":    signal.get("gemini_score", 0),
+        "bullish":         signal["probability"]["bullish"],
+        "bearish":         signal["probability"]["bearish"],
         "price_change_1h": signal["probability"]["price_change_1h"],
-        "reasons":   signal["probability"]["reasons"],
+        "reasons":         signal["probability"]["reasons"],
     }
     data["signals"].insert(0, entry)
     data["signals"] = data["signals"][:MAX_HISTORY_SIZE]

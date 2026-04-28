@@ -291,6 +291,167 @@ def format_no_trends() -> str:
     )
 
 
+def format_pnl_card(snapshot: dict) -> str:
+    """
+    Live PnL card for a single OPEN signal.
+    Called by /pnl refresh or mid-update.
+    """
+    token      = escape_md(snapshot.get("token", "???"))
+    pnl        = snapshot.get("pnl_pct", 0.0)
+    entry      = snapshot.get("entry_price", 0)
+    live       = snapshot.get("live_price", entry)
+    hold       = snapshot.get("hold_hours", 0.0)
+    score      = snapshot.get("gemini_score", "—")
+    address    = snapshot.get("address", "")
+
+    pnl_str    = f"+{pnl:.1f}%" if pnl >= 0 else f"{pnl:.1f}%"
+    pnl_emoji  = "🚀" if pnl >= 50 else "🟢" if pnl >= 20 else "🟡" if pnl >= 0 else "🟠" if pnl >= -15 else "🔴"
+    entry_str  = f"${entry:.8f}" if entry < 0.01 else f"${entry:.4f}"
+    live_str   = f"${live:.8f}"  if live  < 0.01 else f"${live:.4f}"
+
+    bar_filled = max(0, min(10, round((pnl + 30) / 8)))
+    bar        = "█" * bar_filled + "░" * (10 - bar_filled)
+
+    dex_link = f"\n🔗 [DexScreener](https://dexscreener.com/solana/{address})" if address else ""
+
+    return (
+        f"📊 *PNL CARD — LIVE*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{pnl_emoji} *{token}*  `{pnl_str}`\n\n"
+        f"```\n"
+        f"{'Entry Price':<14} {entry_str:>12}\n"
+        f"{'Live Price':<14} {live_str:>12}\n"
+        f"{'PnL':<14} {pnl_str:>12}\n"
+        f"{'PnL Bar':<14} {bar:>12}\n"
+        f"{'Hold Time':<14} {hold:.1f}h{' ':>9}\n"
+        f"{'AI Score':<14} {str(score):>11}/100\n"
+        f"{'Status':<14} {'OPEN 🟡':>12}\n"
+        f"```"
+        f"{dex_link}\n\n"
+        f"_⚠️ DYOR — Not financial advice_"
+    )
+
+
+def format_pnl_closed(record: dict) -> str:
+    """
+    Final PnL card when a signal closes — TP, SL, or timeout.
+    Sent automatically to admin chat.
+    """
+    token      = escape_md(record.get("token", "???"))
+    pnl        = record.get("pnl_pct", 0.0)
+    entry      = record.get("entry_price", 0)
+    exit_p     = record.get("exit_price", entry)
+    hold       = record.get("hold_hours", 0.0)
+    score      = record.get("gemini_score", "—")
+    reason     = record.get("close_reason", "timeout")
+    win        = record.get("win", False)
+    address    = record.get("address", "")
+
+    pnl_str   = f"+{pnl:.1f}%" if pnl >= 0 else f"{pnl:.1f}%"
+    entry_str = f"${entry:.8f}" if entry < 0.01 else f"${entry:.4f}"
+    exit_str  = f"${exit_p:.8f}" if exit_p < 0.01 else f"${exit_p:.4f}"
+
+    reason_labels = {
+        "take_profit": "✅ TAKE PROFIT HIT",
+        "stop_loss":   "❌ STOP LOSS HIT",
+        "timeout":     "⏱ AUTO\\-CLOSED \\(8hrs\\)",
+        "manual":      "🔒 MANUALLY CLOSED",
+    }
+    result_label = reason_labels.get(reason, "CLOSED")
+    result_emoji = "🏆" if win else "💀"
+    dex_link     = f"\n🔗 [DexScreener](https://dexscreener.com/solana/{address})" if address else ""
+
+    return (
+        f"📊 *PNL CARD — CLOSED*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{result_emoji} *{token}*  `{pnl_str}`\n"
+        f"*{result_label}*\n\n"
+        f"```\n"
+        f"{'Entry Price':<14} {entry_str:>12}\n"
+        f"{'Exit Price':<14} {exit_str:>12}\n"
+        f"{'PnL':<14} {pnl_str:>12}\n"
+        f"{'Hold Time':<14} {hold:.1f}h{' ':>9}\n"
+        f"{'AI Score':<14} {str(score):>11}/100\n"
+        f"{'Result':<14} {'WIN ✅' if win else 'LOSS ❌':>12}\n"
+        f"```"
+        f"{dex_link}\n\n"
+        f"_⚠️ DYOR — Not financial advice_"
+    )
+
+
+def format_pnl_mid_update(snapshot: dict) -> str:
+    """
+    4hr mid-update card sent automatically to admin chat.
+    Same as live card but labelled as mid-update.
+    """
+    base = format_pnl_card(snapshot)
+    # Replace the header line only
+    return base.replace(
+        "📊 *PNL CARD — LIVE*",
+        "⏰ *PNL MID\\-UPDATE \\(4hrs\\)*"
+    )
+
+
+def format_pnl_scorecard(scorecard: dict, ai_comment: str = "") -> str:
+    """
+    Full bot scorecard — shown when admin runs /pnl.
+    Shows overall win rate, best/worst trade, open signals count.
+    """
+    total    = scorecard.get("total", 0)
+    wins     = scorecard.get("wins", 0)
+    losses   = scorecard.get("losses", 0)
+    win_rate = scorecard.get("win_rate", 0.0)
+    avg_prof = scorecard.get("avg_profit", 0.0)
+    avg_loss = scorecard.get("avg_loss", 0.0)
+    best     = scorecard.get("best_trade")
+    worst    = scorecard.get("worst_trade")
+    open_c   = scorecard.get("open_count", 0)
+
+    if total == 0:
+        return (
+            "📊 *BOT SCORECARD*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "😴 No closed signals yet\\.\n\n"
+            f"📂 Open signals: *{open_c}*\n\n"
+            "_Fire some signals and come back\\!_"
+        )
+
+    wr_emoji  = "🔥" if win_rate >= 70 else "🟢" if win_rate >= 55 else "🟡" if win_rate >= 45 else "🔴"
+    avg_p_str = f"+{avg_prof:.1f}%" if avg_prof >= 0 else f"{avg_prof:.1f}%"
+    avg_l_str = f"{avg_loss:.1f}%"
+
+    best_line  = (
+        f"🏆 Best:   *{escape_md(best['token'])}*  `+{best['pnl_pct']:.1f}%`\n"
+        if best else ""
+    )
+    worst_line = (
+        f"💀 Worst:  *{escape_md(worst['token'])}*  `{worst['pnl_pct']:.1f}%`\n"
+        if worst else ""
+    )
+
+    ai_line = f"\n🤖 _{escape_md(ai_comment)}_\n" if ai_comment else ""
+
+    return (
+        f"📊 *BOT SCORECARD*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{wr_emoji} *Win Rate: {win_rate:.1f}%*  "
+        f"\\({wins}W / {losses}L\\)\n\n"
+        f"```\n"
+        f"{'Total Signals':<16} {total:>8}\n"
+        f"{'Wins':<16} {wins:>8}\n"
+        f"{'Losses':<16} {losses:>8}\n"
+        f"{'Win Rate':<16} {win_rate:>7.1f}%\n"
+        f"{'Avg Profit':<16} {avg_p_str:>8}\n"
+        f"{'Avg Loss':<16} {avg_l_str:>8}\n"
+        f"{'Open Now':<16} {open_c:>8}\n"
+        f"```\n"
+        f"{best_line}"
+        f"{worst_line}"
+        f"{ai_line}\n"
+        f"_⚠️ Past performance ≠ future results_"
+    )
+
+
 def escape_md(text: str) -> str:
     """Escape special MarkdownV2 characters for Telegram."""
     if not text:

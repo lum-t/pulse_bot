@@ -6,7 +6,7 @@ Handles commands, scheduler, and message routing
 
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 
 from telegram import Update, BotCommand
 from telegram.ext import (
@@ -21,7 +21,13 @@ from trends  import get_trending_content_ideas, get_ideas_for_topic
 from alerts  import (
     format_market_signal, format_content_alert,
     format_new_tokens, format_no_signals, format_no_trends,
-    format_signal_summary, format_trend_summary, escape_md
+    format_signal_summary, format_trend_summary, escape_md,
+    format_pnl_card, format_pnl_closed, format_pnl_mid_update,
+    format_pnl_scorecard,
+)
+from pnl import (
+    record_signal, refresh_all_open, check_mid_updates,
+    get_scorecard, gemini_scorecard_comment,
 )
 
 # ─── Logging ─────────────────────────────────────────────────
@@ -50,7 +56,6 @@ async def safe_reply(update: Update, text: str):
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         log.warning(f"[bot] Markdown send failed ({e}), retrying as plain text")
-        # Strip common markdown chars and retry
         plain = text.replace("*", "").replace("_", "").replace("\\", "").replace("`", "")
         try:
             await update.message.reply_text(plain)
@@ -76,10 +81,12 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Probability scores, volume spikes, new tokens\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "*Commands:*\n\n"
-        "🎨 /trending — current trending ideas\n"
+        "🎨 /trending — current trending content ideas\n"
         "💡 /ideas \\[topic\\] — ideas for any topic\n\n"
         "📈 /signals — live Solana signals\n"
         "🆕 /newtokens — new token launches\n\n"
+        "📊 /pnl — live PnL refresh \\+ bot scorecard\n"
+        "👛 /wallets — tracked whale wallets\n\n"
         "⚙️ /status — bot health check\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "_PULSE is not financial advice\\._\n"
@@ -91,7 +98,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, ctx):
         return
-    now = datetime.utcnow().strftime("%Y\\-%m\\-%d %H:%M UTC")
+    now = datetime.now(timezone.utc).strftime("%Y\\-%m\\-%d %H:%M UTC")
     msg = (
         "⚙️ *PULSE BOT — STATUS*\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -122,11 +129,19 @@ async def cmd_signals(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update, format_no_signals())
         return
 
-    # Send up to 3 signals directly to the user
     for signal in signals[:3]:
         try:
             msg = format_market_signal(signal)
             await safe_reply(update, msg)
+
+            addr   = signal.get("token_address") or signal.get("address", "")
+            gscore = signal.get("gemini_score", 0)
+            if addr:
+                await record_signal(
+                    token=signal.get("symbol", signal.get("name", "???")),
+                    token_address=addr,
+                    gemini_score=gscore,
+                )
         except Exception as e:
             log.error(f"[bot] Failed to send signal: {e}")
 
@@ -148,7 +163,6 @@ async def cmd_trending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update, format_no_trends())
         return
 
-    # Send up to 2 ideas directly to the user
     for idea in ideas[:2]:
         try:
             msg = format_content_alert(idea)
@@ -200,28 +214,99 @@ async def cmd_newtokens(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update, "⚠️ Token fetch failed\\. DexScreener may be rate limiting\\.")
 
 
+async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin only — live PnL refresh + bot scorecard."""
+    if not await admin_only(update, ctx):
+        return
+
+    await safe_reply(update, "📊 *Refreshing PnL\\.\\.\\.*")
+
+    try:
+        snapshots = await refresh_all_open()
+
+        if not snapshots:
+            await safe_reply(
+                update,
+                "📊 *PnL TRACKER*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "😴 No open signals right now\\.\n\n"
+                "_Signals are recorded automatically when /signals is run\\._"
+            )
+        else:
+            for snap in snapshots:
+                try:
+                    if snap.get("just_closed"):
+                        msg = format_pnl_closed(snap)
+                    else:
+                        msg = format_pnl_card(snap)
+                    await safe_reply(update, msg)
+                except Exception as e:
+                    log.error(f"[bot] Failed to format PnL card: {e}")
+
+        # Always show scorecard at the end
+        scorecard  = get_scorecard()
+        ai_comment = await gemini_scorecard_comment(scorecard)
+        sc_msg     = format_pnl_scorecard(scorecard, ai_comment)
+        await safe_reply(update, sc_msg)
+
+    except Exception as e:
+        log.error(f"[bot] cmd_pnl crashed: {e}")
+        await safe_reply(update, "⚠️ PnL refresh failed\\. Check logs for details\\.")
+
+
+async def cmd_wallets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin only — show currently tracked whale wallets."""
+    if not await admin_only(update, ctx):
+        return
+
+    try:
+        from pnl import _load
+        data     = _load()
+        open_sig = data.get("open", {})
+
+        if not open_sig:
+            await safe_reply(
+                update,
+                "👛 *TRACKED WALLETS*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "😴 No wallets being tracked yet\\.\n\n"
+                "_Run /signals to start tracking new entries\\._"
+            )
+            return
+
+        lines = [
+            "👛 *TRACKED WHALE WALLETS*",
+            "━━━━━━━━━━━━━━━━━━━━",
+        ]
+        for i, (addr, record) in enumerate(open_sig.items(), 1):
+            token = escape_md(record.get("token", "???"))
+            short = addr[:6] + "\\.\\.\\." + addr[-4:]
+            score = record.get("gemini_score", "—")
+            lines.append(f"{i}\\. *{token}* — `{short}` — AI: {score}/100")
+
+        lines.append("\n_Wallets auto\\-refresh every 6 hours_")
+        await safe_reply(update, "\n".join(lines))
+
+    except Exception as e:
+        log.error(f"[bot] cmd_wallets crashed: {e}")
+        await safe_reply(update, "⚠️ Could not load wallet data\\.")
+
+
 async def handle_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, ctx):
         return
     await safe_reply(update, "❓ Unknown command\\. Type /start to see all commands\\.")
 
 
-# ─── Scheduled Auto-Alerts (channel + both admin DMs) ────────
+# ─── Scheduled Auto-Alerts ────────────────────────────────────
 
 async def _broadcast(app: Application, msg: str, label: str):
-    """
-    Send msg to:
-      1. Public channel (TELEGRAM_CHANNEL_ID)
-      2. Both admin private chats (ADMIN_1_CHAT_ID + ADMIN_2_CHAT_ID)
-    Failures on individual targets are logged but don't stop others.
-    """
+    """Send msg to channel + both admin DMs."""
     targets = []
 
-    # Channel
     if config.TELEGRAM_CHANNEL_ID:
         targets.append(("channel", config.TELEGRAM_CHANNEL_ID))
 
-    # Admin DMs
     for chat_id in config.ADMIN_CHAT_IDS:
         targets.append(("admin DM", chat_id))
 
@@ -254,6 +339,35 @@ async def auto_signal_check(app: Application):
     await _broadcast(app, msg, f"signal summary ({len(signals)} signals)")
 
 
+async def auto_pnl_check(app: Application):
+    """Runs hourly — sends mid-updates and auto-closes signals that hit TP/SL/timeout."""
+    log.info("[scheduler] Running PnL mid-update check...")
+    try:
+        updates = await check_mid_updates()
+    except Exception as e:
+        log.error(f"[scheduler] check_mid_updates() crashed: {e}")
+        return
+
+    for update_data in updates:
+        try:
+            if update_data.get("type") == "closed":
+                msg = format_pnl_closed(update_data)
+            else:
+                msg = format_pnl_mid_update(update_data)
+
+            for chat_id in config.ADMIN_CHAT_IDS:
+                try:
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=msg,
+                        parse_mode=ParseMode.MARKDOWN_V2
+                    )
+                except Exception as e:
+                    log.error(f"[scheduler] PnL update failed to admin {chat_id}: {e}")
+        except Exception as e:
+            log.error(f"[scheduler] Failed to format PnL update: {e}")
+
+
 async def auto_trend_check(app: Application):
     """Runs on schedule — sends trend summary to channel + both admin DMs."""
     log.info("[scheduler] Running auto trend check...")
@@ -282,6 +396,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("trending",  cmd_trending))
     app.add_handler(CommandHandler("ideas",     cmd_ideas))
     app.add_handler(CommandHandler("newtokens", cmd_newtokens))
+    app.add_handler(CommandHandler("pnl",       cmd_pnl))
+    app.add_handler(CommandHandler("wallets",   cmd_wallets))
     app.add_handler(MessageHandler(filters.COMMAND, handle_unknown))
 
     return app
@@ -310,6 +426,8 @@ async def main():
         BotCommand("ideas",     "💡 Ideas for a specific topic"),
         BotCommand("signals",   "📈 Live Solana memecoin signals"),
         BotCommand("newtokens", "🆕 New token launches"),
+        BotCommand("pnl",       "📊 Live PnL refresh + bot scorecard"),
+        BotCommand("wallets",   "👛 Tracked whale wallets"),
         BotCommand("status",    "⚙️ Bot health check"),
     ])
 
@@ -324,9 +442,15 @@ async def main():
         minutes=config.TREND_CHECK_INTERVAL,
         args=[app], id="trend_check"
     )
+    scheduler.add_job(
+        auto_pnl_check, "interval",
+        minutes=60,
+        args=[app], id="pnl_check"
+    )
     scheduler.start()
     log.info(f"[scheduler] Signal check every {config.SIGNAL_CHECK_INTERVAL} min")
     log.info(f"[scheduler] Trend check every {config.TREND_CHECK_INTERVAL} min")
+    log.info(f"[scheduler] PnL mid-update check every 60 min")
 
     log.info("⚡ PULSE BOT is running...")
     await app.run_polling(allowed_updates=Update.ALL_TYPES)
