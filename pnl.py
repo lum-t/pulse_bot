@@ -16,7 +16,7 @@ MID_UPDATE_HOURS  = int(os.getenv("MID_UPDATE_HOURS", 4))
 DEXSCREENER_BASE  = "https://api.dexscreener.com/latest/dex"
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
-gemini = genai.GenerativeModel("gemini-1.5-flash")
+gemini = genai.GenerativeModel("gemini-2.0-flash")
 
 logger = logging.getLogger(__name__)
 
