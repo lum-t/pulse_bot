@@ -45,19 +45,8 @@ GROQ_BASE_URL    = "https://api.groq.com/openai/v1"
 OPENROUTER_MODEL    = "meta-llama/llama-4-maverick:free"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# ─── LunarCrush ──────────────────────────────────────────────
-LUNARCRUSH_API_KEY  = os.getenv("LUNARCRUSH_API_KEY", "")
-LUNARCRUSH_BASE_URL = "https://lunarcrush.com/api4/public"
-
-# Minimum social score before a token is considered for signals
-LUNARCRUSH_MIN_GALAXY_SCORE  = 40   # 0–100, higher = more social buzz
-LUNARCRUSH_MIN_SOCIAL_VOLUME = 500  # minimum posts/mentions across platforms
-
-# ─── Shyft (Wallet Tracking) ─────────────────────────────────
-SHYFT_API_KEY  = os.getenv("SHYFT_API_KEY", "")
-SHYFT_BASE_URL = "https://api.shyft.to/sol/v1"
-
-# ─── Timezone ────────────────────────────────────────────────
+# ─── Whale Discovery ─────────────────────────────────────────
+# Pulled from DexScreener top traders, scored by Gemini
 DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "Africa/Lagos")
 
 # ─── Rate Limiting ───────────────────────────────────────────
