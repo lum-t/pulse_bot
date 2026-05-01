@@ -101,26 +101,31 @@ def format_signal_summary(signals: list[dict]) -> str:
 
 def format_content_alert(idea: dict) -> str:
     """
-    Full content idea output:
-    Topic → search volume → ideas per platform → best time to post → hashtags
+    Full content idea output — rich sectioned format:
+    Header → Ideas → Opportunity Alert → Repost Strategy →
+    Post Times → Audience Targeting → Hashtags
     """
-    topic      = idea["topic"]
-    status     = idea["status"]
-    category   = idea["category"].upper()
-    ideas      = idea["ideas"]
-    hashtags   = " ".join(idea["hashtags"][:5])
-    ts         = idea.get("timestamp", "")
-    searches   = idea.get("trend_score", None)
-    ai_powered = idea.get("ai_powered", False)
-    post_times = idea.get("post_times", {})
+    topic       = idea["topic"]
+    status      = idea["status"]
+    category    = idea["category"].upper()
+    ideas       = idea["ideas"]
+    hashtags    = idea.get("hashtags", [])
+    ts          = idea.get("timestamp", "")
+    searches    = idea.get("trend_score", None)
+    ai_powered  = idea.get("ai_powered", False)
+    post_times  = idea.get("post_times", {})
+    opportunity = idea.get("opportunity", {})
 
+    DIV = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # ── Header ────────────────────────────────────────────────
     if searches:
         vol_str     = f"{searches:,}" if isinstance(searches, int) else str(searches)
-        search_line = f"📊 *{escape_md(vol_str)}* people searching  |  🕐 {escape_md(ts)}\n"
+        search_line = f"📊 *{escape_md(vol_str)}* people searching  |  🕐 {escape_md(ts)}"
     else:
-        search_line = f"🕐 {escape_md(ts)}\n"
+        search_line = f"🕐 {escape_md(ts)}"
 
-    ai_badge = "🤖 _AI\\-Powered Ideas_\n" if ai_powered else ""
+    ai_badge = "  🤖 _AI\\-Powered_" if ai_powered else ""
 
     platform_emojis = {
         "YouTube":     "▶️",
@@ -128,6 +133,7 @@ def format_content_alert(idea: dict) -> str:
         "X (Twitter)": "𝕏",
     }
 
+    # ── Content Ideas per platform ────────────────────────────
     idea_lines = ""
     for platform, platform_ideas in ideas.items():
         emoji = platform_emojis.get(platform, "📱")
@@ -135,25 +141,115 @@ def format_content_alert(idea: dict) -> str:
         for idx, idea_text in enumerate(platform_ideas, 1):
             idea_lines += f"  {idx}\\. {escape_md(idea_text)}\n"
 
-    post_section = "\n⏰ *BEST TIME TO POST:*\n"
+    # ── Opportunity Alert section ─────────────────────────────
+    gap         = escape_md(opportunity.get("gap",         "No animator has covered this yet\\!"))
+    first_mover = escape_md(opportunity.get("first_mover", "YOU can own this trend"))
+    stitch_tip  = escape_md(opportunity.get("stitch_tip",  "Find top video on this trend & animate a reply"))
+
+    opp_section = (
+        f"\n{DIV}\n"
+        f"🚨 *OPPORTUNITY ALERT*\n"
+        f"{DIV}\n"
+        f"🕳 *Gap Found:* {gap}\n"
+        f"🔓 *Untapped:* YouTube Shorts\n"
+        f"   wide open on this trend\n"
+        f"⚡ *First Mover Advantage:*\n"
+        f"   {first_mover}\n"
+        f"🎬 *Stitch Opportunity:*\n"
+        f"   {stitch_tip}\n"
+    )
+
+    # ── Repost Strategy section ───────────────────────────────
+    repost_day = escape_md(opportunity.get("repost_day", "Sunday"))
+
+    repost_section = (
+        f"\n{DIV}\n"
+        f"🔁 *REPOST STRATEGY*\n"
+        f"{DIV}\n"
+        f"📉 *Repost If Views Under:* 200\n"
+        f"⏳ *Wait:* 48 hours first\n"
+        f"✂️ *Edit Before Repost:* Yes\n"
+        f"   Change hook \\& first 3s\n"
+        f"📅 *Best Repost Day:* {repost_day}\n"
+        f"🔢 *Maximum Reposts:* 2x only\n"
+        f"📲 *If TikTok Flops:*\n"
+        f"   Try YouTube Shorts next\n"
+    )
+
+    # ── Post Times section ────────────────────────────────────
+    post_section = (
+        f"\n{DIV}\n"
+        f"⏰ *POST TIMES*\n"
+        f"{DIV}\n"
+    )
     for platform, info in post_times.items():
         emoji   = platform_emojis.get(platform, "📱")
-        time    = escape_md(info["time"])
-        day     = escape_md(info["day"])
-        urgency = info["urgency"]
-        post_section += f"  {emoji} *{escape_md(platform)}* → {time} \\({day}\\) {urgency}\n"
+        p_time  = escape_md(info.get("time", "—"))
+        p_day   = escape_md(info.get("best_day", info.get("day", "")))
+        post_section += f"{emoji} *{escape_md(platform)}*\n  → {p_time}\n"
 
+    # Find and append best day line
+    best_day_vals = [
+        info.get("best_day", info.get("day", ""))
+        for info in post_times.values()
+    ]
+    # Use the most urgent platform's best day
+    if post_times:
+        most_urgent = min(post_times.items(), key=lambda x: x[1].get("hours_until", 99))
+        best_day = escape_md(most_urgent[1].get("best_day", most_urgent[1].get("day", "Today")))
+    else:
+        best_day = "Today"
+    post_section += f"📅 *Best Day:* {best_day} for\n   maximum reach\n"
+
+    # ── Audience Targeting section ────────────────────────────
+    audience_section = (
+        f"\n{DIV}\n"
+        f"🎯 *AUDIENCE TARGETING*\n"
+        f"{DIV}\n"
+        f"🇺🇸 USA  — Highest revenue\n"
+        f"🇵🇭 Philippines  — Most engaged\n"
+        f"🇮🇩 Indonesia  — Fastest growing\n"
+        f"🇬🇧 UK — Strong animation fans\n"
+        f"🗣 Language: English recommended\n"
+    )
+
+    # ── Hashtags section ──────────────────────────────────────
+    # Keep first 3 user hashtags, inject fixed ones, then add topic tag
+    topic_tag   = f"#{ topic.replace(' ', '') }"
+    base_tags   = [h for h in hashtags[:3] if h.lower() not in ("#animation", "#animatorlife")]
+    fixed_tags  = ["#animation", "#animatorlife", topic_tag, "#fyp", "#cartoon",
+                   "#funny", "#viral", "#trending"]
+    all_tags    = base_tags + fixed_tags
+    # De-dupe while preserving order
+    seen_tags: set = set()
+    deduped: list  = []
+    for t in all_tags:
+        tl = t.lower()
+        if tl not in seen_tags:
+            seen_tags.add(tl)
+            deduped.append(t)
+
+    hashtag_section = (
+        f"\n{DIV}\n"
+        f"#️⃣ *HASHTAGS*\n"
+        f"{DIV}\n"
+        + escape_md(" ".join(deduped[:8]))
+    )
+
+    # ── Assemble full message ─────────────────────────────────
     msg = (
         f"🎨 *CONTENT PULSE*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{DIV}\n"
         f"🔍 *{escape_md(topic)}*\n"
-        f"📂 `{escape_md(category)}`  |  {status}\n"
-        f"{search_line}"
-        f"{ai_badge}"
-        f"\n🎬 *Animation Ideas:*"
+        f"📂 `{escape_md(category)}`  |  {status}{ai_badge}\n"
+        f"{search_line}\n"
+        f"\n🎬 *Content Ideas:*"
         f"{idea_lines}"
-        f"{post_section}\n"
-        f"#️⃣ {escape_md(hashtags)}"
+        f"{opp_section}"
+        f"{repost_section}"
+        f"{post_section}"
+        f"{audience_section}"
+        f"{hashtag_section}"
     )
     return msg
 

@@ -1,0 +1,68 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ⚡ PULSE BOT — Environment Variables
+# Copy this to .env and fill in your values
+# ⚠️  NEVER share this file or upload it to GitHub
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ─── Telegram Bot ─────────────────────────────────────────────
+TELEGRAM_TOKEN=your_bot_token_here
+TELEGRAM_CHANNEL_ID=your_channel_id_here        # e.g. -1001234567890
+
+# ─── Admin User IDs ───────────────────────────────────────────
+# Only these users can send commands to the bot
+# Get yours by messaging @userinfobot on Telegram
+ADMIN_1_ID=your_user_id_here
+ADMIN_2_ID=second_admin_user_id_here            # leave blank if only 1 admin
+
+# ─── Admin Chat IDs ───────────────────────────────────────────
+# Private DM chat IDs — bot sends auto alerts here too
+# Usually the same as your user ID for private chats
+ADMIN_1_CHAT_ID=your_chat_id_here
+ADMIN_2_CHAT_ID=second_admin_chat_id_here       # leave blank if only 1 admin
+
+# ─── Scheduler Intervals ──────────────────────────────────────
+SIGNAL_CHECK_INTERVAL=15                        # minutes between market scans
+TREND_CHECK_INTERVAL=30                         # minutes between content scans
+
+# ─── Timezone ─────────────────────────────────────────────────
+DEFAULT_TIMEZONE=Africa/Lagos
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🤖 AI — Google Gemini
+# Get your key at: aistudio.google.com
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🌙 LunarCrush — Social Sentiment for Crypto
+# Get your key at: lunarcrush.com/developers
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LUNARCRUSH_API_KEY=your_lunarcrush_api_key_here
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 👛 Shyft — Solana Wallet Tracking
+# Get your key at: shyft.to
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SHYFT_API_KEY=your_shyft_api_key_here
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 📊 RapidAPI — Social Stats / Milestone Tracking
+# Get your key at: rapidapi.com
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RAPIDAPI_KEY=your_rapidapi_key_here
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 📈 PnL Tracker Settings (admin only)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PNL_STOP_LOSS_PCT=30                            # auto-close signal if drops this %
+PNL_TAKE_PROFIT_PCT=50                          # auto-close signal if gains this %
+PNL_AUTO_CLOSE_HOURS=8                          # auto-close all open signals after X hours
+PNL_UPDATE_INTERVAL=60                          # minutes between auto PnL checks
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 🐋 Whale Tracker Settings
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHALE_MIN_WIN_RATE=65                           # minimum win rate % to track a wallet
+WHALE_MIN_SCORE=70                              # minimum Gemini score to add wallet
+WHALE_MAX_TRACKED=20                            # max wallets to track at once
+WHALE_CHECK_INTERVAL=30                         # minutes between whale wallet checks

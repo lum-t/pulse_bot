@@ -6,7 +6,7 @@ Handles commands, scheduler, and message routing
 
 import logging
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 
 from telegram import Update, BotCommand
 from telegram.ext import (
@@ -56,6 +56,7 @@ async def safe_reply(update: Update, text: str):
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         log.warning(f"[bot] Markdown send failed ({e}), retrying as plain text")
+        # Strip common markdown chars and retry
         plain = text.replace("*", "").replace("_", "").replace("\\", "").replace("`", "")
         try:
             await update.message.reply_text(plain)
@@ -81,12 +82,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Probability scores, volume spikes, new tokens\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "*Commands:*\n\n"
-        "🎨 /trending — current trending content ideas\n"
+        "🎨 /trending — current trending ideas\n"
         "💡 /ideas \\[topic\\] — ideas for any topic\n\n"
         "📈 /signals — live Solana signals\n"
         "🆕 /newtokens — new token launches\n\n"
-        "📊 /pnl — live PnL refresh \\+ bot scorecard\n"
-        "👛 /wallets — tracked whale wallets\n\n"
         "⚙️ /status — bot health check\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "_PULSE is not financial advice\\._\n"
@@ -98,7 +97,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, ctx):
         return
-    now = datetime.now(timezone.utc).strftime("%Y\\-%m\\-%d %H:%M UTC")
+    now = datetime.utcnow().strftime("%Y\\-%m\\-%d %H:%M UTC")
     msg = (
         "⚙️ *PULSE BOT — STATUS*\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -129,12 +128,14 @@ async def cmd_signals(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update, format_no_signals())
         return
 
+    # Send up to 3 signals directly to the user
     for signal in signals[:3]:
         try:
             msg = format_market_signal(signal)
             await safe_reply(update, msg)
 
-            addr   = signal.get("token_address") or signal.get("address", "")
+            # Record each signal in PnL tracker (admin only, silently)
+            addr = signal.get("token_address") or signal.get("address", "")
             gscore = signal.get("gemini_score", 0)
             if addr:
                 await record_signal(
@@ -163,6 +164,7 @@ async def cmd_trending(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update, format_no_trends())
         return
 
+    # Send up to 2 ideas directly to the user
     for idea in ideas[:2]:
         try:
             msg = format_content_alert(idea)
@@ -222,16 +224,11 @@ async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await safe_reply(update, "📊 *Refreshing PnL\\.\\.\\.*")
 
     try:
+        # 1. Fetch live prices for all open signals and auto-close any that hit TP/SL/timeout
         snapshots = await refresh_all_open()
 
         if not snapshots:
-            await safe_reply(
-                update,
-                "📊 *PnL TRACKER*\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "😴 No open signals right now\\.\n\n"
-                "_Signals are recorded automatically when /signals is run\\._"
-            )
+            await safe_reply(update, "😴 No open signals right now\\. Fire /signals to start tracking\\.")
         else:
             for snap in snapshots:
                 try:
@@ -243,7 +240,7 @@ async def cmd_pnl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     log.error(f"[bot] Failed to format PnL card: {e}")
 
-        # Always show scorecard at the end
+        # 2. Always show the bot scorecard at the end
         scorecard  = get_scorecard()
         ai_comment = await gemini_scorecard_comment(scorecard)
         sc_msg     = format_pnl_scorecard(scorecard, ai_comment)
@@ -265,13 +262,7 @@ async def cmd_wallets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         open_sig = data.get("open", {})
 
         if not open_sig:
-            await safe_reply(
-                update,
-                "👛 *TRACKED WALLETS*\n"
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "😴 No wallets being tracked yet\\.\n\n"
-                "_Run /signals to start tracking new entries\\._"
-            )
+            await safe_reply(update, "👛 *TRACKED WALLETS*\n━━━━━━━━━━━━━━━━━━━━\n😴 No wallets being tracked yet\\.")
             return
 
         lines = [
@@ -298,15 +289,22 @@ async def handle_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await safe_reply(update, "❓ Unknown command\\. Type /start to see all commands\\.")
 
 
-# ─── Scheduled Auto-Alerts ────────────────────────────────────
+# ─── Scheduled Auto-Alerts (channel + both admin DMs) ────────
 
 async def _broadcast(app: Application, msg: str, label: str):
-    """Send msg to channel + both admin DMs."""
+    """
+    Send msg to:
+      1. Public channel (TELEGRAM_CHANNEL_ID)
+      2. Both admin private chats (ADMIN_1_CHAT_ID + ADMIN_2_CHAT_ID)
+    Failures on individual targets are logged but don't stop others.
+    """
     targets = []
 
+    # Channel
     if config.TELEGRAM_CHANNEL_ID:
         targets.append(("channel", config.TELEGRAM_CHANNEL_ID))
 
+    # Admin DMs
     for chat_id in config.ADMIN_CHAT_IDS:
         targets.append(("admin DM", chat_id))
 
@@ -355,6 +353,7 @@ async def auto_pnl_check(app: Application):
             else:
                 msg = format_pnl_mid_update(update_data)
 
+            # Send only to admin DMs (not channel) — PnL is admin-only
             for chat_id in config.ADMIN_CHAT_IDS:
                 try:
                     await app.bot.send_message(

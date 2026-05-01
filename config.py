@@ -32,6 +32,19 @@ TREND_CHECK_INTERVAL  = int(os.getenv("TREND_CHECK_INTERVAL",  30))  # minutes
 # ─── AI (Google Gemini) ──────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
+# ─── AI Fallback Providers ───────────────────────────────────
+# Used automatically when Gemini hits rate limits
+GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+
+# Groq model to use (fast, free, OpenAI-compatible)
+GROQ_MODEL       = "llama-3.3-70b-versatile"
+GROQ_BASE_URL    = "https://api.groq.com/openai/v1"
+
+# OpenRouter model to use (free tier)
+OPENROUTER_MODEL    = "meta-llama/llama-4-maverick:free"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
 # ─── LunarCrush ──────────────────────────────────────────────
 LUNARCRUSH_API_KEY  = os.getenv("LUNARCRUSH_API_KEY", "")
 LUNARCRUSH_BASE_URL = "https://lunarcrush.com/api4/public"

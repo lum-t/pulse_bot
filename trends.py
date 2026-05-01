@@ -19,9 +19,16 @@ import requests
 from pytrends.request import TrendReq
 
 import google.generativeai as genai
+from openai import OpenAI
 
 from config import (
     GEMINI_API_KEY,
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    GROQ_BASE_URL,
+    OPENROUTER_API_KEY,
+    OPENROUTER_MODEL,
+    OPENROUTER_BASE_URL,
     LIFESTYLE_KEYWORDS,
     ANIMATION_KEYWORDS,
     GENERAL_TRENDING,
@@ -32,7 +39,48 @@ from config import (
 log = logging.getLogger(__name__)
 
 genai.configure(api_key=GEMINI_API_KEY)
-gemini = genai.GenerativeModel("gemini-2.0-flash")
+gemini = genai.GenerativeModel("gemini-1.5-flash")
+
+# ─── Fallback AI chain ────────────────────────────────────────
+
+def _call_fallback_ai(prompt: str) -> str:
+    """
+    Try Groq first, then OpenRouter, as fallbacks when Gemini rate-limits.
+    Returns the raw text response or raises Exception if all fail.
+    """
+    # ── Groq ──────────────────────────────────────────────────
+    if GROQ_API_KEY:
+        try:
+            client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL)
+            resp = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=1000,
+            )
+            text = resp.choices[0].message.content.strip()
+            log.info("[ai_fallback] Groq responded successfully.")
+            return text
+        except Exception as e:
+            log.warning(f"[ai_fallback] Groq failed: {e} — trying OpenRouter...")
+
+    # ── OpenRouter ────────────────────────────────────────────
+    if OPENROUTER_API_KEY:
+        try:
+            client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE_URL)
+            resp = client.chat.completions.create(
+                model=OPENROUTER_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=1000,
+            )
+            text = resp.choices[0].message.content.strip()
+            log.info("[ai_fallback] OpenRouter responded successfully.")
+            return text
+        except Exception as e:
+            log.warning(f"[ai_fallback] OpenRouter failed: {e}")
+
+    raise Exception("All AI providers exhausted.")
 
 # ─── Google Trends ────────────────────────────────────────────
 
@@ -148,21 +196,32 @@ Respond ONLY in this exact JSON format, no markdown, no extra text:
   "general":   ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"]
 }"""
 
-    try:
-        response = gemini.generate_content(prompt)
-        text = response.text.strip()
+    def _parse_keywords(text: str) -> dict:
         text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         parsed = json.loads(text)
-
         required = {"animation", "lifestyle", "general"}
         if not required.issubset(parsed.keys()):
-            raise ValueError(f"Missing keyword buckets in Gemini response: {parsed.keys()}")
-
-        log.info(f"[trends] Gemini generated keywords: {parsed}")
+            raise ValueError(f"Missing keyword buckets: {parsed.keys()}")
         return parsed
 
+    # ── Try Gemini first ──────────────────────────────────────
+    if GEMINI_API_KEY:
+        try:
+            response = gemini.generate_content(prompt)
+            parsed = _parse_keywords(response.text.strip())
+            log.info(f"[trends] Gemini generated keywords: {parsed}")
+            return parsed
+        except Exception as e:
+            log.warning(f"[trends] Gemini keyword gen failed ({e}) — trying fallback AI...")
+
+    # ── Fallback to Groq / OpenRouter ─────────────────────────
+    try:
+        text   = _call_fallback_ai(prompt)
+        parsed = _parse_keywords(text)
+        log.info(f"[trends] Fallback AI generated keywords: {parsed}")
+        return parsed
     except Exception as e:
-        log.error(f"[trends] Gemini keyword generation failed: {e} — using static fallback.")
+        log.error(f"[trends] All AI keyword generation failed: {e} — using static fallback.")
         return _static_keyword_fallback()
 
 
@@ -179,12 +238,10 @@ def _static_keyword_fallback() -> dict[str, list[str]]:
 
 def _gemini_generate_ideas(topic: str, category: str, trend_score: int) -> dict:
     """
-    Ask Gemini to generate platform-specific content ideas for a topic.
+    Ask AI to generate platform-specific content ideas for a topic.
+    Tries Gemini first, then Groq, then OpenRouter.
     Returns structured ideas dict ready for format_content_alert().
     """
-    if not GEMINI_API_KEY:
-        return _fallback_idea(topic, category, trend_score)
-
     prompt = f"""You are a viral content strategist for a creator who makes animation and lifestyle content.
 
 TRENDING TOPIC: "{topic}"
@@ -192,6 +249,8 @@ CATEGORY: {category}
 GOOGLE TREND SCORE: {trend_score}/100
 
 Generate creative, specific content ideas for this creator. Focus on animation, lifestyle vlogging, and general entertainment angles. Do NOT generate crypto or financial content.
+
+For "best_day", think about what day of the week would get the MOST views for this specific topic (e.g. weekend topics do better on Friday/Saturday, Monday motivation topics on Monday, etc).
 
 Respond ONLY in this exact JSON format, no markdown, no extra text:
 {{
@@ -202,32 +261,52 @@ Respond ONLY in this exact JSON format, no markdown, no extra text:
   }},
   "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"],
   "post_times": {{
-    "YouTube": {{"time": "6:00 PM", "day": "Saturday", "urgency": "🔥 Peak weekend views", "hours_until": 8}},
-    "TikTok": {{"time": "7:00 PM", "day": "Today", "urgency": "⚡ Post now", "hours_until": 2}},
-    "X (Twitter)": {{"time": "12:00 PM", "day": "Tomorrow", "urgency": "📅 Schedule it", "hours_until": 18}}
+    "YouTube": {{"time": "6:00 PM", "day": "Saturday", "best_day": "Saturday", "urgency": "🔥 Peak weekend views", "hours_until": 8}},
+    "TikTok": {{"time": "7:00 PM", "day": "Today", "best_day": "Friday", "urgency": "⚡ Post now", "hours_until": 2}},
+    "X (Twitter)": {{"time": "12:00 PM", "day": "Tomorrow", "best_day": "Wednesday", "urgency": "📅 Schedule it", "hours_until": 18}}
+  }},
+  "opportunity": {{
+    "gap": "Brief description of the content gap (e.g. No animator has covered this yet)",
+    "first_mover": "Why being first matters here",
+    "stitch_tip": "Specific stitch/duet opportunity for this trend",
+    "repost_day": "Best day to repost if it flops (e.g. Sunday)"
   }}
 }}"""
 
-    try:
-        response = gemini.generate_content(prompt)
-        text = response.text.strip()
+    def _parse_ideas(text: str, ai_powered: bool) -> dict:
         text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         parsed = json.loads(text)
-
         return {
-            "topic":        topic,
-            "category":     category,
-            "status":       _trend_status(trend_score),
-            "trend_score":  trend_score,
-            "timestamp":    datetime.now(timezone.utc).strftime("%d %b %H:%M UTC"),
-            "ideas":        parsed.get("ideas", _default_ideas(topic)),
-            "hashtags":     parsed.get("hashtags", [f"#{topic.replace(' ', '')}"]),
-            "post_times":   parsed.get("post_times", _default_post_times()),
-            "ai_powered":   True,
+            "topic":       topic,
+            "category":    category,
+            "status":      _trend_status(trend_score),
+            "trend_score": trend_score,
+            "timestamp":   datetime.now(timezone.utc).strftime("%d %b %H:%M UTC"),
+            "ideas":       parsed.get("ideas", _default_ideas(topic)),
+            "hashtags":    parsed.get("hashtags", [f"#{topic.replace(' ', '')}"]),
+            "post_times":  parsed.get("post_times", _default_post_times()),
+            "opportunity": parsed.get("opportunity", _default_opportunity(topic)),
+            "ai_powered":  ai_powered,
         }
 
+    # ── Try Gemini first ──────────────────────────────────────
+    if GEMINI_API_KEY:
+        try:
+            response = gemini.generate_content(prompt)
+            result = _parse_ideas(response.text.strip(), ai_powered=True)
+            log.info(f"[trends] Gemini generated ideas for '{topic}'.")
+            return result
+        except Exception as e:
+            log.warning(f"[trends] Gemini idea gen failed ({e}) — trying fallback AI...")
+
+    # ── Fallback to Groq / OpenRouter ─────────────────────────
+    try:
+        text   = _call_fallback_ai(prompt)
+        result = _parse_ideas(text, ai_powered=True)
+        log.info(f"[trends] Fallback AI generated ideas for '{topic}'.")
+        return result
     except Exception as e:
-        log.error(f"[trends] Gemini idea generation failed for '{topic}': {e}")
+        log.error(f"[trends] All AI idea generation failed for '{topic}': {e}")
         return _fallback_idea(topic, category, trend_score)
 
 
